@@ -1,6 +1,6 @@
 import argparse
 
-from models.whisper import WhisperWrapper
+from metric_collection.language.child_adult_diarization.whisper_modeling.models.whisper import WhisperWrapper
 import torch
 import numpy as np
 from subprocess import CalledProcessError, run
