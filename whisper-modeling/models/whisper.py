@@ -212,34 +212,45 @@ class WhisperWrapper(nn.Module):
             tmp_length = self.get_feat_extract_output_lengths(len(x[0]))
             # Replace positional embeddings
             self.backbone_model.encoder.embed_positions = self.backbone_model.encoder.embed_positions.from_pretrained(self.embed_positions[:tmp_length])
-            
-        # 3. transformer encoding features
-        features = self.backbone_model.encoder(
-            features, output_hidden_states=True
-        ).hidden_states
-        # 4. stacked feature
-        if self.use_conv_output:
-            stacked_feature = torch.stack(features, dim=0)
-        else:
-            stacked_feature = torch.stack(features, dim=0)[1:]
-        
-        # 5. Weighted sum
-        _, *origin_shape = stacked_feature.shape
-        # Return transformer enc outputs [num_enc_layers, B, T, D]
-        if self.use_conv_output:
-            stacked_feature = stacked_feature.view(self.backbone_model.config.num_hidden_layers+1, -1)
-        else:
-            stacked_feature = stacked_feature.view(self.backbone_model.config.num_hidden_layers, -1)
-        norm_weights = F.softmax(self.weights, dim=-1)
-        
-        # Perform weighted average
-        weighted_feature = (norm_weights.unsqueeze(-1) * stacked_feature).sum(dim=0)
-        features = weighted_feature.view(*origin_shape)
-        
-        # 6. Pass the weighted average to point-wise 1D Conv
-        # B x T x D
-        features = features.transpose(1, 2)
-        predicted = self.model_seq(features)
+
+        # 3. resizing tensor to fit whisper model
+        feature_list = list(torch.split(features, 3000, dim=2))
+        padding = 3000 - feature_list[-1].size(dim=2)
+        if padding > 0:
+            feature_list[-1] = F.pad(input=feature_list[-1], pad=(0, padding), mode='constant', value=0)
+
+        predictions = []
+        for feature_section in feature_list:
+            # 4. transformer encoding features
+            features = self.backbone_model.encoder(
+                feature_section, output_hidden_states=True
+            ).hidden_states
+
+            # 5. stacked feature
+            if self.use_conv_output:
+                stacked_feature = torch.stack(features, dim=0)
+            else:
+                stacked_feature = torch.stack(features, dim=0)[1:]
+
+            # 6. Weighted sum
+            _, *origin_shape = stacked_feature.shape
+            # Return transformer enc outputs [num_enc_layers, B, T, D]
+            if self.use_conv_output:
+                stacked_feature = stacked_feature.view(self.backbone_model.config.num_hidden_layers+1, -1)
+            else:
+                stacked_feature = stacked_feature.view(self.backbone_model.config.num_hidden_layers, -1)
+            norm_weights = F.softmax(self.weights, dim=-1)
+
+            # Perform weighted average
+            weighted_feature = (norm_weights.unsqueeze(-1) * stacked_feature).sum(dim=0)
+            features = weighted_feature.view(*origin_shape)
+
+            # 7. Pass the weighted average to point-wise 1D Conv
+            # B x T x D
+            features = features.transpose(1, 2)
+            predicted = self.model_seq(features)
+            predictions.append(predicted)
+        predicted = torch.cat(predictions, axis=2)
         return predicted
 
     def forward_eval(self, x):
